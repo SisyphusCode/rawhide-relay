@@ -1,6 +1,6 @@
 Name:           rawhide-relay
 Version:        0.1.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        GTK4 IRC client written in Rust using relm4
 
 License:        GPL-2.0-or-later
@@ -12,6 +12,7 @@ BuildRequires:  rust
 BuildRequires:  pkgconfig(gtk4)
 BuildRequires:  pkgconfig(openssl)
 BuildRequires:  desktop-file-utils
+BuildRequires:  appstream
 
 %description
 Rawhide Relay is a GTK4 IRC client built in Rust with relm4.
@@ -27,9 +28,12 @@ cargo build --release --offline
 install -Dm755 target/release/rawhide-relay %{buildroot}%{_bindir}/rawhide-relay
 install -Dm644 packaging/rawhide-relay.desktop %{buildroot}%{_datadir}/applications/rawhide-relay.desktop
 install -Dm644 assets/rawhide-relay.png %{buildroot}%{_datadir}/icons/hicolor/128x128/apps/rawhide-relay.png
+install -Dm644 assets/rawhide-relay.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/rawhide-relay.svg
+install -Dm644 packaging/org.Sisyphus.RawhideRelay.metainfo.xml %{buildroot}%{_metainfodir}/org.Sisyphus.RawhideRelay.metainfo.xml
 
 %check
 desktop-file-validate packaging/rawhide-relay.desktop
+appstream-util validate-relax --nonet packaging/org.Sisyphus.RawhideRelay.metainfo.xml
 
 %files
 %license LICENSE
@@ -37,7 +41,11 @@ desktop-file-validate packaging/rawhide-relay.desktop
 %{_bindir}/rawhide-relay
 %{_datadir}/applications/rawhide-relay.desktop
 %{_datadir}/icons/hicolor/128x128/apps/rawhide-relay.png
+%{_datadir}/icons/hicolor/scalable/apps/rawhide-relay.svg
+%{_metainfodir}/org.Sisyphus.RawhideRelay.metainfo.xml
 
 %changelog
-* Sun Jun 21 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.1.0-2
-- Add desktop entry and application icon
+* Sun Jun 21 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.1.0-3
+- Add AppStream metainfo
+- Add scalable SVG icon
+- Polish desktop integration

@@ -8,3 +8,4 @@ Type=Application
 Categories=Network;Chat;GTK;
 Keywords=IRC;Libera;Chat;Rust;GTK;
 StartupNotify=true
+StartupWMClass=Rawhide Relay
