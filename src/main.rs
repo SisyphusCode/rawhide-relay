@@ -35,6 +35,24 @@ const GRUVBOX_CSS: &str = "
         padding: 4px 12px; font-family: monospace; 
     }
     .user-btn:hover { background-color: #3c3836; color: #ebdbb2; }
+
+    .fav-btn {
+        background-color: transparent;
+        color: #fabd2f;
+        border: 1px solid transparent; 
+        box-shadow: none;
+        padding: 6px 8px; 
+        font-family: monospace;
+    }
+    .fav-btn:hover { 
+        background-color: #3c3836; 
+        border: 1px solid #504945; 
+        color: #fbf1c7; 
+    }
+
+    .muted-user {
+        color: #928374;
+    }
 ";
 
 #[derive(Debug, Clone)]
@@ -47,6 +65,8 @@ pub enum AppInput {
     NetworkConnected(irc::client::Sender),
     SelectChannel(String),
     JoinChannel(String),
+    ToggleFavorite(String),
+    ToggleMute { channel: String, user: String },
     ReceiveMessage { channel: String, user: String, body: String },
     ReceiveServerMessage(String),
     BatchAddUsers { channel: String, users: Vec<String> },
@@ -60,6 +80,8 @@ struct AppModel {
     status: String,
     active_channel: String,
     channels: Vec<String>,
+    favorite_channels: Vec<String>,
+    muted_users: HashMap<String, Vec<String>>,
     chat_histories: HashMap<String, String>,
     channel_users: HashMap<String, Vec<String>>,
     irc_sender: Option<irc::client::Sender>,
@@ -71,20 +93,101 @@ struct AppModel {
 }
 
 impl AppModel {
+    fn normalized_nick(user: &str) -> String {
+        user.trim_start_matches(&['@', '+', '%', '~', '&'][..]).to_string()
+    }
+
+    fn is_muted(&self, channel: &str, user: &str) -> bool {
+        let clean = Self::normalized_nick(user);
+        self.muted_users
+            .get(channel)
+            .map(|users| users.iter().any(|u| u == &clean))
+            .unwrap_or(false)
+    }
+
+    fn refresh_channels(&self, sender: &ComponentSender<Self>) {
+        while let Some(child) = self.channel_box.first_child() {
+            self.channel_box.remove(&child);
+        }
+
+        let mut favorites = Vec::new();
+        let mut others = Vec::new();
+
+        for channel in &self.channels {
+            if self.favorite_channels.contains(channel) {
+                favorites.push(channel.clone());
+            } else {
+                others.push(channel.clone());
+            }
+        }
+
+        for channel in favorites.into_iter().chain(others.into_iter()) {
+            let is_favorite = self.favorite_channels.contains(&channel);
+
+            let row = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(4)
+                .build();
+
+            let select_btn = gtk::Button::with_label(&channel);
+            select_btn.set_hexpand(true);
+            select_btn.set_halign(gtk::Align::Fill);
+
+            let s1 = sender.clone();
+            let ch1 = channel.clone();
+            select_btn.connect_clicked(move |_| {
+                s1.input(AppInput::SelectChannel(ch1.clone()));
+            });
+
+            let fav_icon = if is_favorite { "★" } else { "☆" };
+            let fav_btn = gtk::Button::with_label(fav_icon);
+            fav_btn.add_css_class("fav-btn");
+
+            let s2 = sender.clone();
+            let ch2 = channel.clone();
+            fav_btn.connect_clicked(move |_| {
+                s2.input(AppInput::ToggleFavorite(ch2.clone()));
+            });
+
+            row.append(&select_btn);
+            row.append(&fav_btn);
+
+            self.channel_box.append(&row);
+        }
+    }
+
     fn refresh_users(&self, sender: &ComponentSender<Self>) {
         while let Some(child) = self.user_box.first_child() {
             self.user_box.remove(&child);
         }
+
         if let Some(users) = self.channel_users.get(&self.active_channel) {
             for user in users {
-                let clean_user = user.trim_start_matches(&['@', '+', '%', '~', '&'][..]).to_string();
-                let btn = gtk::Button::with_label(user);
+                let clean_user = Self::normalized_nick(user);
+                let muted = self.is_muted(&self.active_channel, user);
+
+                let label = if muted {
+                    format!("🔇 {}", user)
+                } else {
+                    user.clone()
+                };
+
+                let btn = gtk::Button::with_label(&label);
                 btn.set_halign(gtk::Align::Start);
                 btn.add_css_class("user-btn");
+                if muted {
+                    btn.add_css_class("muted-user");
+                }
+
                 let s = sender.clone();
+                let channel = self.active_channel.clone();
                 btn.connect_clicked(move |_| {
-                    s.input(AppInput::JoinChannel(clean_user.clone()));
+                    s.input(AppInput::ToggleMute {
+                        channel: channel.clone(),
+                        user: clean_user.clone(),
+                    });
                 });
+
                 self.user_box.append(&btn);
             }
         }
@@ -205,11 +308,13 @@ impl SimpleComponent for AppModel {
     fn init(_init: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let server_tab = String::from("Server");
         let dev_channel = String::from("#fedora-devel");
-        // FIX: ##rust is the correct Libera.Chat channel name (unofficial channels use ##)
         let rust_channel = String::from("##rust");
 
         let mut chat_histories = HashMap::new();
-        chat_histories.insert(server_tab.clone(), String::from("[System]: Ready. Enter password if registered and connect.\n"));
+        chat_histories.insert(
+            server_tab.clone(),
+            String::from("[System]: Ready. Enter password if registered and connect.\n"),
+        );
 
         let channel_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let user_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -217,7 +322,13 @@ impl SimpleComponent for AppModel {
         let model = AppModel {
             status: String::from("Offline"),
             active_channel: server_tab.clone(),
-            channels: vec![server_tab, dev_channel, rust_channel],
+            channels: vec![server_tab.clone(), dev_channel, rust_channel],
+            favorite_channels: vec![
+                server_tab.clone(),
+                String::from("#fedora-devel"),
+                String::from("##rust"),
+            ],
+            muted_users: HashMap::new(),
             chat_histories,
             channel_users: HashMap::new(),
             irc_sender: None,
@@ -228,17 +339,14 @@ impl SimpleComponent for AppModel {
             user_box: user_box.clone(),
         };
 
-        for channel in &model.channels {
-            let btn = gtk::Button::with_label(channel);
-            let s = sender.clone(); let ch = channel.clone();
-            btn.connect_clicked(move |_| { s.input(AppInput::SelectChannel(ch.clone())); });
-            channel_box.append(&btn);
-        }
-
         let channel_box_ref = &model.channel_box;
         let user_box_ref = &model.user_box;
         let widgets = view_output!();
-        ComponentParts { model, widgets }
+
+        let parts = ComponentParts { model, widgets };
+        parts.model.refresh_channels(&sender);
+        parts.model.refresh_users(&sender);
+        parts
     }
 
     fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>) {
@@ -246,139 +354,252 @@ impl SimpleComponent for AppModel {
             AppInput::UpdateNickname(nick) => { self.nickname = nick; }
             AppInput::UpdateServer(srv) => { self.server = srv; }
             AppInput::UpdatePassword(pwd) => { self.password = pwd; }
+
             AppInput::Connect => {
-                if self.status == "Connecting..." || self.status == "Connected" { return; }
+                if self.status == "Connecting..." || self.status == "Connected" {
+                    return;
+                }
                 self.status = String::from("Connecting...");
                 let sender_clone = sender.clone();
-                
-                let channels_to_join: Vec<String> = self.channels.iter().filter(|c| c.starts_with('#')).cloned().collect();
+
+                let channels_to_join: Vec<String> = self.channels
+                    .iter()
+                    .filter(|c| c.starts_with('#'))
+                    .cloned()
+                    .collect();
+
                 let nickname = self.nickname.clone();
                 let server_addr = self.server.clone();
                 let pwd = self.password.clone();
-                
+
                 thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().expect("Failed to build Tokio core");
                     rt.block_on(async {
                         let config = Config {
-                            nickname: Some(nickname.clone()), 
+                            nickname: Some(nickname.clone()),
                             server: Some(server_addr),
-                            channels: channels_to_join, 
-                            port: Some(6697), 
+                            channels: channels_to_join,
+                            port: Some(6697),
                             use_tls: Some(true),
                             nick_password: if pwd.is_empty() { None } else { Some(pwd) },
                             ..Config::default()
                         };
 
                         let mut client = match Client::from_config(config).await {
-                            Ok(c) => c, Err(_) => { sender_clone.input(AppInput::NetworkStatus(String::from("Connection Failed."))); return; }
+                            Ok(c) => c,
+                            Err(_) => {
+                                sender_clone.input(AppInput::NetworkStatus(String::from("Connection Failed.")));
+                                return;
+                            }
                         };
 
-                        if client.identify().is_err() { sender_clone.input(AppInput::NetworkStatus(String::from("Auth Failed."))); return; }
+                        if client.identify().is_err() {
+                            sender_clone.input(AppInput::NetworkStatus(String::from("Auth Failed.")));
+                            return;
+                        }
+
                         sender_clone.input(AppInput::NetworkConnected(client.sender()));
-                        let mut stream = match client.stream() { Ok(s) => s, Err(_) => return, };
+
+                        let mut stream = match client.stream() {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
 
                         while let Some(Ok(message)) = stream.next().await {
                             let user = message.source_nickname().unwrap_or("Unknown").to_string();
-                            
+
                             match message.command {
                                 Command::PRIVMSG(target, body) => {
                                     let display_target = if target == nickname { user.clone() } else { target };
-                                    sender_clone.input(AppInput::ReceiveMessage { channel: display_target, user, body });
+                                    sender_clone.input(AppInput::ReceiveMessage {
+                                        channel: display_target,
+                                        user,
+                                        body,
+                                    });
                                 }
                                 Command::JOIN(channel, _, _) => {
-                                    sender_clone.input(AppInput::UserJoined { channel: channel.clone(), user: user.clone() });
-                                    sender_clone.input(AppInput::ReceiveMessage { channel, user: "System".to_string(), body: format!("{} joined.", user) });
+                                    sender_clone.input(AppInput::UserJoined {
+                                        channel: channel.clone(),
+                                        user: user.clone(),
+                                    });
+                                    sender_clone.input(AppInput::ReceiveMessage {
+                                        channel,
+                                        user: "System".to_string(),
+                                        body: format!("{} joined.", user),
+                                    });
                                 }
                                 Command::PART(channel, _) => {
-                                    sender_clone.input(AppInput::UserLeft { channel: channel.clone(), user: user.clone() });
-                                    sender_clone.input(AppInput::ReceiveMessage { channel, user: "System".to_string(), body: format!("{} left.", user) });
+                                    sender_clone.input(AppInput::UserLeft {
+                                        channel: channel.clone(),
+                                        user: user.clone(),
+                                    });
+                                    sender_clone.input(AppInput::ReceiveMessage {
+                                        channel,
+                                        user: "System".to_string(),
+                                        body: format!("{} left.", user),
+                                    });
                                 }
-                                Command::QUIT(_) => { sender_clone.input(AppInput::UserQuit { user }); }
-                                Command::NOTICE(_, body) => { sender_clone.input(AppInput::ReceiveServerMessage(format!("[Notice]: {}", body))); }
+                                Command::QUIT(_) => {
+                                    sender_clone.input(AppInput::UserQuit { user });
+                                }
+                                Command::NOTICE(_, body) => {
+                                    sender_clone.input(AppInput::ReceiveServerMessage(format!("[Notice]: {}", body)));
+                                }
                                 Command::Response(code, args) => {
                                     if code == Response::RPL_NAMREPLY && args.len() >= 4 {
-                                        // FIX: robustly find the channel arg (starts with #) instead of
-                                        // assuming a fixed index, since some servers vary the format
                                         let channel = args.iter()
                                             .find(|a| a.starts_with('#'))
                                             .cloned()
                                             .unwrap_or_else(|| args[2].clone());
+
                                         let users: Vec<String> = args.last()
                                             .unwrap_or(&String::new())
                                             .split_whitespace()
                                             .map(|s| s.to_string())
                                             .collect();
+
                                         sender_clone.input(AppInput::BatchAddUsers { channel, users });
                                     } else if code == Response::RPL_ENDOFNAMES {
                                     } else if args.len() > 1 {
-                                        sender_clone.input(AppInput::ReceiveServerMessage(format!("[{:?}]: {}", code, args[1..].join(" "))));
+                                        sender_clone.input(AppInput::ReceiveServerMessage(format!(
+                                            "[{:?}]: {}",
+                                            code,
+                                            args[1..].join(" ")
+                                        )));
                                     }
                                 }
-                                _ => {} 
+                                _ => {}
                             }
                         }
                     });
                 });
             }
-            AppInput::NetworkStatus(new_status) => { self.status = new_status; }
-            AppInput::NetworkConnected(irc_tx) => { self.irc_sender = Some(irc_tx); self.status = String::from("Connected"); }
-            AppInput::SelectChannel(channel) => { 
-                self.active_channel = channel; 
+
+            AppInput::NetworkStatus(new_status) => {
+                self.status = new_status;
+            }
+
+            AppInput::NetworkConnected(irc_tx) => {
+                self.irc_sender = Some(irc_tx);
+                self.status = String::from("Connected");
+            }
+
+            AppInput::SelectChannel(channel) => {
+                self.active_channel = channel;
                 self.refresh_users(&sender);
             }
+
             AppInput::JoinChannel(target) => {
                 if !self.channels.contains(&target) {
                     self.channels.push(target.clone());
-                    self.chat_histories.insert(target.clone(), format!("[System]: Tracking {}\n", target));
-                    
-                    let btn = gtk::Button::with_label(&target);
-                    let s = sender.clone(); let t = target.clone();
-                    btn.connect_clicked(move |_| { s.input(AppInput::SelectChannel(t.clone())); });
-                    self.channel_box.append(&btn);
-                    
+                    self.chat_histories
+                        .insert(target.clone(), format!("[System]: Tracking {}\n", target));
+
+                    self.refresh_channels(&sender);
+
                     if let Some(irc_tx) = &self.irc_sender {
-                        if target.starts_with('#') { let _ = irc_tx.send_join(&target); }
+                        if target.starts_with('#') {
+                            let _ = irc_tx.send_join(&target);
+                        }
                     }
                 }
+
                 self.active_channel = target;
                 self.refresh_users(&sender);
             }
+
+            AppInput::ToggleFavorite(channel) => {
+                if self.favorite_channels.contains(&channel) {
+                    self.favorite_channels.retain(|c| c != &channel);
+                } else {
+                    self.favorite_channels.push(channel.clone());
+                }
+                self.refresh_channels(&sender);
+            }
+
+            AppInput::ToggleMute { channel, user } => {
+                let list = self.muted_users.entry(channel.clone()).or_insert_with(Vec::new);
+
+                if list.contains(&user) {
+                    list.retain(|u| u != &user);
+                    let log = self.chat_histories.entry(channel.clone()).or_insert_with(String::new);
+                    log.push_str(&format!("[System]: Unmuted {}\n", user));
+                } else {
+                    list.push(user.clone());
+                    list.sort_by_key(|u| u.to_lowercase());
+                    let log = self.chat_histories.entry(channel.clone()).or_insert_with(String::new);
+                    log.push_str(&format!("[System]: Muted {}\n", user));
+                }
+
+                if self.active_channel == channel {
+                    self.refresh_users(&sender);
+                }
+            }
+
             AppInput::ReceiveMessage { channel, user, body } => {
+                if self.is_muted(&channel, &user) {
+                    return;
+                }
+
                 if !self.channels.contains(&channel) && !channel.starts_with('#') {
                     self.channels.push(channel.clone());
-                    let btn = gtk::Button::with_label(&channel);
-                    let s = sender.clone(); let t = channel.clone();
-                    btn.connect_clicked(move |_| { s.input(AppInput::SelectChannel(t.clone())); });
-                    self.channel_box.append(&btn);
+                    self.refresh_channels(&sender);
                 }
+
                 let log = self.chat_histories.entry(channel).or_insert_with(String::new);
                 log.push_str(&format!("<{}> {}\n", user, body));
             }
+
             AppInput::ReceiveServerMessage(body) => {
                 let log = self.chat_histories.entry(String::from("Server")).or_insert_with(String::new);
                 log.push_str(&format!("{}\n", body));
             }
+
             AppInput::BatchAddUsers { channel, users } => {
                 let list = self.channel_users.entry(channel.clone()).or_insert_with(Vec::new);
-                for u in users { if !list.contains(&u) { list.push(u); } }
+                for u in users {
+                    if !list.contains(&u) {
+                        list.push(u);
+                    }
+                }
                 list.sort_by_key(|a| a.to_lowercase());
-                if self.active_channel == channel { self.refresh_users(&sender); }
+                if self.active_channel == channel {
+                    self.refresh_users(&sender);
+                }
             }
+
             AppInput::UserJoined { channel, user } => {
                 let list = self.channel_users.entry(channel.clone()).or_insert_with(Vec::new);
-                if !list.contains(&user) { list.push(user); list.sort_by_key(|a| a.to_lowercase()); }
-                if self.active_channel == channel { self.refresh_users(&sender); }
+                if !list.contains(&user) {
+                    list.push(user);
+                    list.sort_by_key(|a| a.to_lowercase());
+                }
+                if self.active_channel == channel {
+                    self.refresh_users(&sender);
+                }
             }
+
             AppInput::UserLeft { channel, user } => {
-                if let Some(list) = self.channel_users.get_mut(&channel) { list.retain(|u| u != &user); }
-                if self.active_channel == channel { self.refresh_users(&sender); }
+                if let Some(list) = self.channel_users.get_mut(&channel) {
+                    list.retain(|u| u != &user);
+                }
+                if self.active_channel == channel {
+                    self.refresh_users(&sender);
+                }
             }
+
             AppInput::UserQuit { user } => {
-                for list in self.channel_users.values_mut() { list.retain(|u| u != &user); }
+                for list in self.channel_users.values_mut() {
+                    list.retain(|u| u != &user);
+                }
                 self.refresh_users(&sender);
             }
+
             AppInput::SendMessage(text) => {
-                if self.active_channel == "Server" { return; } 
+                if self.active_channel == "Server" {
+                    return;
+                }
+
                 if let Some(irc_tx) = &self.irc_sender {
                     if irc_tx.send_privmsg(&self.active_channel, &text).is_ok() {
                         let log = self.chat_histories.entry(self.active_channel.clone()).or_insert_with(String::new);
