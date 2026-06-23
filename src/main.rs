@@ -421,13 +421,15 @@ impl SimpleComponent for AppModel {
                 thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().expect("Failed to build Tokio core");
                     rt.block_on(async {
+                        let needs_nickserv = !pwd.is_empty();
                         let config = Config {
                             nickname: Some(nickname.clone()),
                             server: Some(server_addr),
-                            channels: channels_to_join,
+                            // Join manually after NickServ (+r channels require login first).
+                            channels: vec![],
                             port: Some(DEFAULT_PORT),
                             use_tls: Some(true),
-                            nick_password: if pwd.is_empty() { None } else { Some(pwd) },
+                            nick_password: if needs_nickserv { Some(pwd.clone()) } else { None },
                             ..Config::default()
                         };
 
@@ -444,7 +446,22 @@ impl SimpleComponent for AppModel {
                             return;
                         }
 
-                        sender_clone.input(AppInput::NetworkConnected(client.sender()));
+                        let irc_tx = client.sender();
+                        sender_clone.input(AppInput::NetworkConnected(irc_tx.clone()));
+
+                        let join_channels = |tx: &irc::client::Sender| {
+                            for chan in &channels_to_join {
+                                let _ = tx.send_join(chan);
+                            }
+                            if !channels_to_join.is_empty() {
+                                sender_clone.input(AppInput::ReceiveServerMessage(format!(
+                                    "[System]: Joining {} channel(s).",
+                                    channels_to_join.len()
+                                )));
+                            }
+                        };
+
+                        let mut channels_joined = false;
 
                         let mut stream = match client.stream() {
                             Ok(s) => s,
@@ -499,8 +516,29 @@ impl SimpleComponent for AppModel {
                                 }
                                 Command::NOTICE(_, body) => {
                                     sender_clone.input(AppInput::ReceiveServerMessage(format!("[Notice]: {}", body)));
+                                    if needs_nickserv
+                                        && !channels_joined
+                                        && body.contains("You are now identified")
+                                    {
+                                        channels_joined = true;
+                                        join_channels(&irc_tx);
+                                    }
                                 }
                                 Command::Response(code, args) => {
+                                    if !channels_joined {
+                                        match code {
+                                            Response::RPL_LOGGEDIN => {
+                                                channels_joined = true;
+                                                join_channels(&irc_tx);
+                                            }
+                                            Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD if !needs_nickserv => {
+                                                channels_joined = true;
+                                                join_channels(&irc_tx);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+
                                     if code == Response::RPL_NAMREPLY && args.len() >= 4 {
                                         let channel = args.iter()
                                             .find(|a| a.starts_with('#'))
