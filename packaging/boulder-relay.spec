@@ -1,6 +1,6 @@
 Name:           boulder-relay
 Version:        0.1.0
-Release:        8%{?dist}
+Release:        9%{?dist}
 Summary:        GTK4 IRC client for Rocky Linux community channels on Libera.Chat
 
 License:        GPL-2.0-or-later
@@ -53,6 +53,9 @@ appstream-util validate-relax --nonet packaging/org.Sisyphus.BoulderRelay.metain
 %{_metainfodir}/org.Sisyphus.BoulderRelay.metainfo.xml
 
 %changelog
+* Tue Jun 23 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.1.0-9
+- Fix channel joins to wait for NickServ login on +r channels
+
 * Tue Jun 23 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.1.0-8
 - Rename project from rawhide-relay to boulder-relay
 
