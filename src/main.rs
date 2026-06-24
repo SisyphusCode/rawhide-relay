@@ -1,9 +1,13 @@
-use relm4::{gtk, ComponentParts, ComponentSender, RelmApp, SimpleComponent, RelmWidgetExt};
+mod config;
+
+use config::Settings;
+use futures::prelude::*;
+use gtk::glib::{self, DateTime};
 use gtk::prelude::*;
+use irc::client::prelude::*;
+use relm4::{gtk, ComponentParts, ComponentSender, RelmApp, RelmWidgetExt, SimpleComponent};
 use std::collections::HashMap;
 use std::thread;
-use irc::client::prelude::*;
-use futures::prelude::*;
 
 const DEFAULT_SERVER: &str = "irc.libera.chat";
 const DEFAULT_NICKNAME: &str = "SisyphusCode";
@@ -17,70 +21,71 @@ const DEFAULT_CHANNELS: &[&str] = &[
     "#rockylinux-social",
 ];
 
-// --- Gruvbox Dark + Rocky green accents ---
 const GRUVBOX_CSS: &str = "
     window { background-color: #282828; }
     label { color: #ebdbb2; font-family: monospace; }
-    
+
     .sidebar { background-color: #1d2021; }
     .sidebar-title { font-weight: bold; color: #10B981; }
     .sidebar-subtitle { font-weight: bold; color: #b8bb26; font-size: 0.9em; }
+    .status-connected { color: #b8bb26; }
+    .status-connecting { color: #fabd2f; }
+    .status-offline { color: #928374; }
 
-    button { 
-        background-color: #3c3836; color: #b8bb26; 
-        border: 1px solid #504945; border-radius: 4px; 
+    button {
+        background-color: #3c3836; color: #b8bb26;
+        border: 1px solid #504945; border-radius: 4px;
         padding: 6px 12px; font-family: monospace;
     }
     button:hover { background-color: #504945; }
-    
+    button.destructive { color: #fb4934; }
+
     entry {
         background-color: #3c3836; color: #ebdbb2;
         border: 1px solid #504945; border-radius: 4px;
         padding: 8px; font-family: monospace;
     }
     entry:focus { border: 1px solid #fe8019; }
-    
-    .chat-text { background-color: #282828; color: #ebdbb2; font-family: monospace; padding: 8px; }
-    
-    .user-btn { 
+
+    textview {
+        background-color: #282828; color: #ebdbb2;
+        font-family: monospace; padding: 8px;
+    }
+    textview text { background-color: #282828; color: #ebdbb2; }
+
+    .user-btn {
         background-color: transparent; color: #83a598; border: none; box-shadow: none;
-        padding: 4px 12px; font-family: monospace; 
+        padding: 4px 12px; font-family: monospace;
     }
     .user-btn:hover { background-color: #3c3836; color: #ebdbb2; }
 
     .fav-btn {
-        background-color: transparent;
-        color: #fabd2f;
-        border: 1px solid transparent; 
-        box-shadow: none;
-        padding: 6px 8px; 
-        font-family: monospace;
+        background-color: transparent; color: #fabd2f;
+        border: 1px solid transparent; box-shadow: none;
+        padding: 6px 8px; font-family: monospace;
     }
-    .fav-btn:hover { 
-        background-color: #3c3836; 
-        border: 1px solid #504945; 
-        color: #fbf1c7; 
+    .fav-btn:hover {
+        background-color: #3c3836; border: 1px solid #504945; color: #fbf1c7;
     }
 
     .mute-btn {
-        background-color: transparent;
-        color: #928374;
-        border: 1px solid transparent; 
-        box-shadow: none;
-        padding: 4px 8px; 
-        font-family: monospace;
+        background-color: transparent; color: #928374;
+        border: 1px solid transparent; box-shadow: none;
+        padding: 4px 8px; font-family: monospace;
     }
-    .mute-btn:hover { 
-        background-color: #3c3836; 
-        border: 1px solid #504945; 
-        color: #ebdbb2; 
+    .mute-btn:hover {
+        background-color: #3c3836; border: 1px solid #504945; color: #ebdbb2;
     }
 
-    .muted-user {
-        color: #928374;
-        text-decoration: line-through;
-    }
+    .muted-user { color: #928374; text-decoration: line-through; }
 ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConnectionState {
+    Offline,
+    Connecting,
+    Connected,
+}
 
 #[derive(Debug, Clone)]
 pub enum AppInput {
@@ -88,6 +93,7 @@ pub enum AppInput {
     UpdateServer(String),
     UpdatePassword(String),
     Connect,
+    Disconnect,
     NetworkStatus(String),
     NetworkConnected(irc::client::Sender),
     SelectChannel(String),
@@ -101,9 +107,11 @@ pub enum AppInput {
     UserLeft { channel: String, user: String },
     UserQuit { user: String },
     SendMessage(String),
+    SaveSettings,
 }
 
 struct AppModel {
+    connection: ConnectionState,
     status: String,
     active_channel: String,
     channels: Vec<String>,
@@ -117,6 +125,7 @@ struct AppModel {
     password: String,
     channel_box: gtk::Box,
     user_box: gtk::Box,
+    chat_view: gtk::TextView,
 }
 
 impl AppModel {
@@ -130,6 +139,60 @@ impl AppModel {
             .get(channel)
             .map(|users| users.iter().any(|u| u == &clean))
             .unwrap_or(false)
+    }
+
+    fn timestamp_prefix() -> String {
+        DateTime::now_local()
+            .map(|dt| format!("[{}] ", dt.format("%H:%M").unwrap_or_default()))
+            .unwrap_or_else(|_| String::from("[??:??] "))
+    }
+
+    fn settings_snapshot(&self) -> Settings {
+        Settings {
+            nickname: self.nickname.clone(),
+            server: self.server.clone(),
+            password: self.password.clone(),
+            favorites: self.favorite_channels.clone(),
+        }
+    }
+
+    fn persist_settings(&self) {
+        if let Err(error) = self.settings_snapshot().save() {
+            eprintln!("Failed to save Boulder Relay settings: {error}");
+        }
+    }
+
+    fn append_line(&mut self, channel: &str, line: &str) {
+        let history = self
+            .chat_histories
+            .entry(channel.to_string())
+            .or_insert_with(String::new);
+        history.push_str(line);
+
+        if self.active_channel == channel {
+            self.append_to_chat_view(line);
+        }
+    }
+
+    fn append_to_chat_view(&self, line: &str) {
+        let buffer = self.chat_view.buffer();
+        let mut end = buffer.end_iter();
+        buffer.insert(&mut end, line);
+
+        let mark = buffer.create_mark(None, &buffer.end_iter(), false);
+        self.chat_view.scroll_to_mark(&mark, 0.0, false, 0.0, 0.0);
+    }
+
+    fn show_channel_history(&self) {
+        let history = self
+            .chat_histories
+            .get(&self.active_channel)
+            .cloned()
+            .unwrap_or_default();
+        self.chat_view.buffer().set_text(&history);
+        let buffer = self.chat_view.buffer();
+        let mark = buffer.create_mark(None, &buffer.end_iter(), false);
+        self.chat_view.scroll_to_mark(&mark, 0.0, false, 0.0, 0.0);
     }
 
     fn refresh_channels(&self, sender: &ComponentSender<Self>) {
@@ -178,7 +241,6 @@ impl AppModel {
 
             row.append(&select_btn);
             row.append(&fav_btn);
-
             self.channel_box.append(&row);
         }
     }
@@ -198,7 +260,6 @@ impl AppModel {
                     .spacing(4)
                     .build();
 
-                // Button to initiate Private Message
                 let dm_btn = gtk::Button::with_label(user);
                 dm_btn.set_hexpand(true);
                 dm_btn.set_halign(gtk::Align::Fill);
@@ -210,11 +271,9 @@ impl AppModel {
                 let s1 = sender.clone();
                 let u1 = clean_user.clone();
                 dm_btn.connect_clicked(move |_| {
-                    // Reusing JoinChannel since our logic handles targets without '#' as DMs
                     s1.input(AppInput::JoinChannel(u1.clone()));
                 });
 
-                // Button to toggle mute state
                 let mute_icon = if muted { "🔇" } else { "🔊" };
                 let mute_btn = gtk::Button::with_label(mute_icon);
                 mute_btn.add_css_class("mute-btn");
@@ -231,7 +290,6 @@ impl AppModel {
 
                 row.append(&dm_btn);
                 row.append(&mute_btn);
-
                 self.user_box.append(&row);
             }
         }
@@ -249,10 +307,15 @@ impl SimpleComponent for AppModel {
             set_title: Some("Boulder Relay — Rocky Linux IRC"),
             set_default_size: (1200, 700),
 
+            connect_close_request[sender] => move |_| {
+                sender.input(AppInput::SaveSettings);
+                glib::Propagation::Proceed
+            },
+
             gtk::Paned {
                 set_orientation: gtk::Orientation::Horizontal,
                 set_position: 240,
-                
+
                 #[wrap(Some)]
                 set_start_child = &gtk::Box {
                     set_orientation: gtk::Orientation::Vertical, set_spacing: 12, set_width_request: 200,
@@ -261,7 +324,7 @@ impl SimpleComponent for AppModel {
                     gtk::Label { set_label: "BOULDER RELAY", add_css_class: "sidebar-title", set_margin_top: 16 },
                     gtk::Label { set_label: "Rocky Linux on Libera", set_margin_start: 12, set_margin_end: 12 },
                     gtk::Separator { set_orientation: gtk::Orientation::Horizontal },
-                    
+
                     gtk::Label { set_label: "Network Configuration", add_css_class: "sidebar-subtitle", set_halign: gtk::Align::Start, set_margin_start: 12 },
                     gtk::Entry {
                         set_text: &model.nickname, set_placeholder_text: Some("Nickname"), set_margin_start: 12, set_margin_end: 12,
@@ -276,23 +339,50 @@ impl SimpleComponent for AppModel {
                         set_text: &model.server, set_placeholder_text: Some("Server address"), set_margin_start: 12, set_margin_end: 12,
                         connect_changed[sender] => move |entry| { sender.input(AppInput::UpdateServer(entry.text().to_string())); }
                     },
-                    gtk::Label { #[watch] set_label: &format!("Status: {}", model.status), set_ellipsize: gtk::pango::EllipsizeMode::End, set_margin_start: 8, set_margin_end: 8 },
-                    gtk::Button { set_label: "Connect to Server", set_margin_start: 12, set_margin_end: 12, connect_clicked => AppInput::Connect },
-                    
+                    gtk::Label {
+                        #[watch]
+                        set_label: &format!("Status: {}", model.status),
+                        set_ellipsize: gtk::pango::EllipsizeMode::End,
+                        set_margin_start: 8,
+                        set_margin_end: 8,
+                        add_css_class: match model.connection {
+                            ConnectionState::Connected => "status-connected",
+                            ConnectionState::Connecting => "status-connecting",
+                            ConnectionState::Offline => "status-offline",
+                        },
+                    },
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Horizontal,
+                        set_spacing: 8,
+                        set_margin_start: 12,
+                        set_margin_end: 12,
+                        gtk::Button {
+                            set_label: "Connect",
+                            set_sensitive: model.connection == ConnectionState::Offline,
+                            connect_clicked => AppInput::Connect,
+                        },
+                        gtk::Button {
+                            set_label: "Disconnect",
+                            add_css_class: "destructive",
+                            set_sensitive: model.connection == ConnectionState::Connected,
+                            connect_clicked => AppInput::Disconnect,
+                        },
+                    },
+
                     gtk::Separator { set_orientation: gtk::Orientation::Horizontal },
 
                     gtk::Label { set_label: "Channels & DMs", add_css_class: "sidebar-subtitle", set_halign: gtk::Align::Start, set_margin_start: 12 },
                     gtk::Entry {
-                        set_placeholder_text: Some("Join #channel or User"), set_margin_start: 12, set_margin_end: 12,
+                        set_placeholder_text: Some("Join #channel, user, or /join …"), set_margin_start: 12, set_margin_end: 12,
                         connect_activate[sender] => move |entry| {
                             let text = entry.text().to_string();
                             if !text.is_empty() {
                                 entry.set_text("");
-                                sender.input(AppInput::JoinChannel(text));
+                                sender.input(AppInput::SendMessage(text));
                             }
                         }
                     },
-                    
+
                     gtk::ScrolledWindow {
                         set_vexpand: true, set_hexpand: true,
                         #[local_ref] channel_box_ref -> gtk::Box {}
@@ -303,7 +393,7 @@ impl SimpleComponent for AppModel {
                 set_end_child = &gtk::Paned {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_position: 680,
-                    
+
                     #[wrap(Some)]
                     set_start_child = &gtk::Box {
                         set_orientation: gtk::Orientation::Vertical, set_spacing: 12, set_margin_all: 16, set_width_request: 300,
@@ -312,16 +402,16 @@ impl SimpleComponent for AppModel {
 
                         gtk::ScrolledWindow {
                             set_vexpand: true, set_hexpand: true, set_propagate_natural_height: true,
-
-                            gtk::Label {
-                                set_halign: gtk::Align::Start, set_valign: gtk::Align::End,
-                                set_selectable: true, set_wrap: true, add_css_class: "chat-text",
-                                #[watch] set_label: model.chat_histories.get(&model.active_channel).unwrap_or(&String::new()),
+                            #[local_ref] chat_view_ref -> gtk::TextView {
+                                set_editable: false,
+                                set_cursor_visible: false,
+                                set_wrap_mode: gtk::WrapMode::Word,
+                                set_vexpand: true,
                             }
                         },
 
                         gtk::Entry {
-                            set_placeholder_text: Some("Type your message here and hit Enter..."), set_hexpand: true,
+                            set_placeholder_text: Some("Message, /join #chan, or /msg nick text…"), set_hexpand: true,
                             connect_activate[sender] => move |entry| {
                                 let text = entry.text().to_string();
                                 if !text.is_empty() {
@@ -350,7 +440,8 @@ impl SimpleComponent for AppModel {
         }
     }
 
-    fn init(_init: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
+    fn init(_init: Self::Init, _root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
+        let settings = Settings::load();
         let server_tab = String::from(SERVER_TAB);
         let rocky_channels: Vec<String> = DEFAULT_CHANNELS.iter().map(|c| c.to_string()).collect();
 
@@ -359,37 +450,57 @@ impl SimpleComponent for AppModel {
             server_tab.clone(),
             String::from(
                 "[System]: Ready for Libera.Chat. Register with NickServ and connect.\n\
-                 [System]: Rocky channels require a registered nick (wiki.rockylinux.org/irc).\n",
+                 [System]: Rocky channels require a registered nick (wiki.rockylinux.org/irc).\n\
+                 [System]: Settings are saved to ~/.config/boulder-relay/settings.conf\n",
             ),
         );
 
         let channel_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let user_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let chat_view = gtk::TextView::new();
 
         let mut channels = vec![server_tab.clone()];
         channels.extend(rocky_channels.clone());
 
+        let favorites = if settings.favorites.is_empty() {
+            vec![server_tab.clone(), rocky_channels[0].clone(), rocky_channels[1].clone()]
+        } else {
+            settings.favorites.clone()
+        };
+
         let model = AppModel {
+            connection: ConnectionState::Offline,
             status: String::from("Offline"),
             active_channel: server_tab.clone(),
             channels,
-            favorite_channels: vec![server_tab.clone(), rocky_channels[0].clone(), rocky_channels[1].clone()],
+            favorite_channels: favorites,
             muted_users: HashMap::new(),
             chat_histories,
             channel_users: HashMap::new(),
             irc_sender: None,
-            nickname: String::from(DEFAULT_NICKNAME),
-            server: String::from(DEFAULT_SERVER),
-            password: String::new(),
+            nickname: if settings.nickname.is_empty() {
+                String::from(DEFAULT_NICKNAME)
+            } else {
+                settings.nickname
+            },
+            server: if settings.server.is_empty() {
+                String::from(DEFAULT_SERVER)
+            } else {
+                settings.server
+            },
+            password: settings.password,
             channel_box: channel_box.clone(),
             user_box: user_box.clone(),
+            chat_view: chat_view.clone(),
         };
 
         let channel_box_ref = &model.channel_box;
         let user_box_ref = &model.user_box;
+        let chat_view_ref = &model.chat_view;
         let widgets = view_output!();
 
-        let parts = ComponentParts { model, widgets };
+        let mut parts = ComponentParts { model, widgets };
+        parts.model.show_channel_history();
         parts.model.refresh_channels(&sender);
         parts.model.refresh_users(&sender);
         parts
@@ -397,18 +508,23 @@ impl SimpleComponent for AppModel {
 
     fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>) {
         match message {
-            AppInput::UpdateNickname(nick) => { self.nickname = nick; }
-            AppInput::UpdateServer(srv) => { self.server = srv; }
-            AppInput::UpdatePassword(pwd) => { self.password = pwd; }
+            AppInput::UpdateNickname(nick) => self.nickname = nick,
+            AppInput::UpdateServer(srv) => self.server = srv,
+            AppInput::UpdatePassword(pwd) => self.password = pwd,
+
+            AppInput::SaveSettings => self.persist_settings(),
 
             AppInput::Connect => {
-                if self.status == "Connecting..." || self.status == "Connected" {
+                if self.connection != ConnectionState::Offline {
                     return;
                 }
+                self.connection = ConnectionState::Connecting;
                 self.status = String::from("Connecting...");
-                let sender_clone = sender.clone();
+                self.persist_settings();
 
-                let channels_to_join: Vec<String> = self.channels
+                let sender_clone = sender.clone();
+                let channels_to_join: Vec<String> = self
+                    .channels
                     .iter()
                     .filter(|c| c.starts_with('#'))
                     .cloned()
@@ -425,24 +541,31 @@ impl SimpleComponent for AppModel {
                         let config = Config {
                             nickname: Some(nickname.clone()),
                             server: Some(server_addr),
-                            // Join manually after NickServ (+r channels require login first).
                             channels: vec![],
                             port: Some(DEFAULT_PORT),
                             use_tls: Some(true),
-                            nick_password: if needs_nickserv { Some(pwd.clone()) } else { None },
+                            nick_password: if needs_nickserv {
+                                Some(pwd.clone())
+                            } else {
+                                None
+                            },
                             ..Config::default()
                         };
 
                         let mut client = match Client::from_config(config).await {
                             Ok(c) => c,
                             Err(e) => {
-                                sender_clone.input(AppInput::NetworkStatus(format!("Connection failed: {e}")));
+                                sender_clone.input(AppInput::NetworkStatus(format!(
+                                    "Connection failed: {e}"
+                                )));
                                 return;
                             }
                         };
 
                         if let Err(e) = client.identify() {
-                            sender_clone.input(AppInput::NetworkStatus(format!("NickServ auth failed: {e}")));
+                            sender_clone.input(AppInput::NetworkStatus(format!(
+                                "NickServ auth failed: {e}"
+                            )));
                             return;
                         }
 
@@ -462,7 +585,6 @@ impl SimpleComponent for AppModel {
                         };
 
                         let mut channels_joined = false;
-
                         let mut stream = match client.stream() {
                             Ok(s) => s,
                             Err(_) => return,
@@ -478,11 +600,18 @@ impl SimpleComponent for AppModel {
                                     continue;
                                 }
                             };
-                            let user = message.source_nickname().unwrap_or("Unknown").to_string();
+                            let user = message
+                                .source_nickname()
+                                .unwrap_or("Unknown")
+                                .to_string();
 
                             match message.command {
                                 Command::PRIVMSG(target, body) => {
-                                    let display_target = if target == nickname { user.clone() } else { target };
+                                    let display_target = if target == nickname {
+                                        user.clone()
+                                    } else {
+                                        target
+                                    };
                                     sender_clone.input(AppInput::ReceiveMessage {
                                         channel: display_target,
                                         user,
@@ -515,7 +644,9 @@ impl SimpleComponent for AppModel {
                                     sender_clone.input(AppInput::UserQuit { user });
                                 }
                                 Command::NOTICE(_, body) => {
-                                    sender_clone.input(AppInput::ReceiveServerMessage(format!("[Notice]: {}", body)));
+                                    sender_clone.input(AppInput::ReceiveServerMessage(format!(
+                                        "[Notice]: {body}"
+                                    )));
                                     if needs_nickserv
                                         && !channels_joined
                                         && body.contains("You are now identified")
@@ -531,7 +662,9 @@ impl SimpleComponent for AppModel {
                                                 channels_joined = true;
                                                 join_channels(&irc_tx);
                                             }
-                                            Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD if !needs_nickserv => {
+                                            Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD
+                                                if !needs_nickserv =>
+                                            {
                                                 channels_joined = true;
                                                 join_channels(&irc_tx);
                                             }
@@ -540,25 +673,27 @@ impl SimpleComponent for AppModel {
                                     }
 
                                     if code == Response::RPL_NAMREPLY && args.len() >= 4 {
-                                        let channel = args.iter()
+                                        let channel = args
+                                            .iter()
                                             .find(|a| a.starts_with('#'))
                                             .cloned()
                                             .unwrap_or_else(|| args[2].clone());
 
-                                        let users: Vec<String> = args.last()
+                                        let users: Vec<String> = args
+                                            .last()
                                             .unwrap_or(&String::new())
                                             .split_whitespace()
                                             .map(|s| s.to_string())
                                             .collect();
 
-                                        sender_clone.input(AppInput::BatchAddUsers { channel, users });
-                                    } else if code == Response::RPL_ENDOFNAMES {
+                                        sender_clone.input(AppInput::BatchAddUsers {
+                                            channel,
+                                            users,
+                                        });
                                     } else if args.len() > 1 {
-                                        sender_clone.input(AppInput::ReceiveServerMessage(format!(
-                                            "[{:?}]: {}",
-                                            code,
-                                            args[1..].join(" ")
-                                        )));
+                                        sender_clone.input(AppInput::ReceiveServerMessage(
+                                            format!("[{code:?}]: {}", args[1..].join(" ")),
+                                        ));
                                     }
                                 }
                                 _ => {}
@@ -573,29 +708,57 @@ impl SimpleComponent for AppModel {
                 });
             }
 
+            AppInput::Disconnect => {
+                if let Some(irc_tx) = self.irc_sender.take() {
+                    let _ = irc_tx.send_quit("Boulder Relay signing off");
+                    self.connection = ConnectionState::Offline;
+                    self.status = String::from("Offline");
+                    self.append_line(
+                        SERVER_TAB,
+                        &format!(
+                            "{}[System]: Disconnected by user.\n",
+                            Self::timestamp_prefix()
+                        ),
+                    );
+                }
+            }
+
             AppInput::NetworkStatus(new_status) => {
                 self.status = new_status.clone();
-                if new_status == "Disconnected" {
+                if new_status == "Disconnected" || new_status.starts_with("Connection failed") {
+                    self.connection = ConnectionState::Offline;
                     self.irc_sender = None;
                 }
             }
 
             AppInput::NetworkConnected(irc_tx) => {
                 self.irc_sender = Some(irc_tx);
+                self.connection = ConnectionState::Connected;
                 self.status = String::from("Connected");
+                self.append_line(
+                    SERVER_TAB,
+                    &format!(
+                        "{}[System]: Connected to {} as {}.\n",
+                        Self::timestamp_prefix(),
+                        self.server,
+                        self.nickname
+                    ),
+                );
             }
 
             AppInput::SelectChannel(channel) => {
                 self.active_channel = channel;
+                self.show_channel_history();
                 self.refresh_users(&sender);
             }
 
             AppInput::JoinChannel(target) => {
                 if !self.channels.contains(&target) {
                     self.channels.push(target.clone());
-                    self.chat_histories
-                        .insert(target.clone(), format!("[System]: Tracking {}\n", target));
-
+                    self.chat_histories.insert(
+                        target.clone(),
+                        format!("[System]: Tracking {target}\n"),
+                    );
                     self.refresh_channels(&sender);
 
                     if let Some(irc_tx) = &self.irc_sender {
@@ -606,6 +769,7 @@ impl SimpleComponent for AppModel {
                 }
 
                 self.active_channel = target;
+                self.show_channel_history();
                 self.refresh_users(&sender);
             }
 
@@ -616,20 +780,36 @@ impl SimpleComponent for AppModel {
                     self.favorite_channels.push(channel.clone());
                 }
                 self.refresh_channels(&sender);
+                self.persist_settings();
             }
 
             AppInput::ToggleMute { channel, user } => {
-                let list = self.muted_users.entry(channel.clone()).or_insert_with(Vec::new);
+                let list = self
+                    .muted_users
+                    .entry(channel.clone())
+                    .or_insert_with(Vec::new);
 
                 if list.contains(&user) {
                     list.retain(|u| u != &user);
-                    let log = self.chat_histories.entry(channel.clone()).or_insert_with(String::new);
-                    log.push_str(&format!("[System]: Unmuted {}\n", user));
+                    self.append_line(
+                        &channel,
+                        &format!(
+                            "{}[System]: Unmuted {}\n",
+                            Self::timestamp_prefix(),
+                            user
+                        ),
+                    );
                 } else {
                     list.push(user.clone());
                     list.sort_by_key(|u| u.to_lowercase());
-                    let log = self.chat_histories.entry(channel.clone()).or_insert_with(String::new);
-                    log.push_str(&format!("[System]: Muted {}\n", user));
+                    self.append_line(
+                        &channel,
+                        &format!(
+                            "{}[System]: Muted {}\n",
+                            Self::timestamp_prefix(),
+                            user
+                        ),
+                    );
                 }
 
                 if self.active_channel == channel {
@@ -647,17 +827,25 @@ impl SimpleComponent for AppModel {
                     self.refresh_channels(&sender);
                 }
 
-                let log = self.chat_histories.entry(channel).or_insert_with(String::new);
-                log.push_str(&format!("<{}> {}\n", user, body));
+                let line = format!(
+                    "{}<{}> {}\n",
+                    Self::timestamp_prefix(),
+                    user,
+                    body
+                );
+                self.append_line(&channel, &line);
             }
 
             AppInput::ReceiveServerMessage(body) => {
-                let log = self.chat_histories.entry(String::from(SERVER_TAB)).or_insert_with(String::new);
-                log.push_str(&format!("{}\n", body));
+                let line = format!("{}{}\n", Self::timestamp_prefix(), body);
+                self.append_line(SERVER_TAB, &line);
             }
 
             AppInput::BatchAddUsers { channel, users } => {
-                let list = self.channel_users.entry(channel.clone()).or_insert_with(Vec::new);
+                let list = self
+                    .channel_users
+                    .entry(channel.clone())
+                    .or_insert_with(Vec::new);
                 for u in users {
                     if !list.contains(&u) {
                         list.push(u);
@@ -670,7 +858,10 @@ impl SimpleComponent for AppModel {
             }
 
             AppInput::UserJoined { channel, user } => {
-                let list = self.channel_users.entry(channel.clone()).or_insert_with(Vec::new);
+                let list = self
+                    .channel_users
+                    .entry(channel.clone())
+                    .or_insert_with(Vec::new);
                 if !list.contains(&user) {
                     list.push(user);
                     list.sort_by_key(|a| a.to_lowercase());
@@ -697,18 +888,91 @@ impl SimpleComponent for AppModel {
             }
 
             AppInput::SendMessage(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return;
+                }
+
+                if text.starts_with('/') {
+                    let mut parts = text.splitn(3, ' ');
+                    let command = parts.next().unwrap_or("");
+                    match command {
+                        "/join" => {
+                            if let Some(channel) = parts.next() {
+                                sender.input(AppInput::JoinChannel(channel.to_string()));
+                            }
+                            return;
+                        }
+                        "/msg" | "/query" => {
+                            if let Some(target) = parts.next() {
+                                let body = parts.next().unwrap_or("");
+                                if !body.is_empty() {
+                                    if let Some(irc_tx) = &self.irc_sender {
+                                        let _ = irc_tx.send_privmsg(target, body);
+                                        let line = format!(
+                                            "{}<{}> {}\n",
+                                            Self::timestamp_prefix(),
+                                            self.nickname,
+                                            body
+                                        );
+                                        self.append_line(target, &line);
+                                    }
+                                } else {
+                                    sender.input(AppInput::JoinChannel(target.to_string()));
+                                }
+                            }
+                            return;
+                        }
+                        "/nick" => {
+                            if let Some(nick) = parts.next() {
+                                self.nickname = nick.to_string();
+                                self.persist_settings();
+                                self.append_line(
+                                    SERVER_TAB,
+                                    &format!(
+                                        "{}[System]: Nickname updated locally to {}. Reconnect to apply.\n",
+                                        Self::timestamp_prefix(),
+                                        self.nickname
+                                    ),
+                                );
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
                 if self.active_channel == SERVER_TAB {
+                    self.append_line(
+                        SERVER_TAB,
+                        &format!(
+                            "{}[System]: Select a channel or DM before sending.\n",
+                            Self::timestamp_prefix()
+                        ),
+                    );
                     return;
                 }
 
                 if let Some(irc_tx) = &self.irc_sender {
-                    if irc_tx.send_privmsg(&self.active_channel, &text).is_ok() {
-                        let log = self.chat_histories.entry(self.active_channel.clone()).or_insert_with(String::new);
-                        log.push_str(&format!("<{}> {}\n", self.nickname, text));
+                    if irc_tx.send_privmsg(&self.active_channel, text).is_ok() {
+                        let channel = self.active_channel.clone();
+                        let line = format!(
+                            "{}<{}> {}\n",
+                            Self::timestamp_prefix(),
+                            self.nickname,
+                            text
+                        );
+                        self.append_line(&channel, &line);
                     }
                 } else {
-                    let log = self.chat_histories.entry(self.active_channel.clone()).or_insert_with(String::new);
-                    log.push_str("[System]: Cannot send message, not connected.\n");
+                    let channel = self.active_channel.clone();
+                    self.append_line(
+                        &channel,
+                        &format!(
+                            "{}[System]: Cannot send message, not connected.\n",
+                            Self::timestamp_prefix()
+                        ),
+                    );
                 }
             }
         }
@@ -717,11 +981,15 @@ impl SimpleComponent for AppModel {
 
 fn main() {
     let app = RelmApp::new("org.Sisyphus.BoulderRelay");
-    
+
     let provider = gtk::CssProvider::new();
     provider.load_from_data(GRUVBOX_CSS);
     if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
     }
 
     app.run::<AppModel>(());

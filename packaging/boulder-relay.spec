@@ -1,6 +1,6 @@
 Name:           boulder-relay
-Version:        0.1.0
-Release:        9%{?dist}
+Version:        0.2.0
+Release:        1%{?dist}
 Summary:        GTK4 IRC client for Rocky Linux community channels on Libera.Chat
 
 License:        GPL-2.0-or-later
@@ -23,8 +23,9 @@ Requires:       openssl-libs
 %description
 Boulder Relay is a GTK4 IRC client built in Rust with relm4, oriented
 toward Rocky Linux development and community chat on Libera.Chat. It
-connects over TLS, supports NickServ authentication, and ships with
-#rockylinux, #rockylinux-devel, and #rockylinux-social as default channels.
+connects over TLS, supports NickServ authentication, persistent settings,
+slash commands, and ships with #rockylinux, #rockylinux-devel, and
+#rockylinux-social as default channels.
 
 %prep
 %autosetup -n boulder-relay-%{version}
@@ -53,6 +54,11 @@ appstream-util validate-relax --nonet packaging/org.Sisyphus.BoulderRelay.metain
 %{_metainfodir}/org.Sisyphus.BoulderRelay.metainfo.xml
 
 %changelog
+* Wed Jun 24 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.2.0-1
+- Add persistent settings, disconnect control, timestamps, and slash commands
+- Improve chat view with auto-scrolling TextView
+- Regenerate vendored crates and verify EL10 / EPEL 10 compatibility
+
 * Tue Jun 23 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.1.0-9
 - Fix channel joins to wait for NickServ login on +r channels
 

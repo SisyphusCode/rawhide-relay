@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build boulder-relay RPM on Rocky Linux / RHEL 9.
+# Build boulder-relay RPM on Rocky Linux / RHEL 9 / 10.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

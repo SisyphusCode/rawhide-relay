@@ -10,6 +10,10 @@ Named for the Sisyphus myth — the conversation you keep pushing uphill.
 - NickServ authentication (required for Rocky Linux channels)
 - Multi-channel support with live user lists
 - Channel favorites and per-user mute
+- Persistent settings (`~/.config/boulder-relay/settings.conf`)
+- Connect / disconnect controls
+- Timestamps and auto-scrolling chat view
+- Slash commands: `/join`, `/msg`, `/nick`
 - Gruvbox Dark theme with Rocky green accents
 
 ## Default channels
@@ -24,15 +28,26 @@ On connect, the client joins Rocky Linux community channels on `irc.libera.chat`
 
 See the [Rocky Linux IRC wiki](https://wiki.rockylinux.org/irc/) for the full channel list and NickServ registration steps.
 
-## Rocky Linux development setup
+## Install from COPR
 
-Install build dependencies on Rocky Linux 9:
+```bash
+sudo dnf copr enable sisyphuscode/boulder-relay
+sudo dnf install boulder-relay
+```
+
+Builds are provided for **EPEL 9**, **EPEL 10**, and Fedora Rawhide.
+
+On RHEL 10 / Rocky Linux 10 / Alma 10, enable EPEL 10 first if it is not already enabled.
+
+## Development setup
+
+Install build dependencies on Rocky Linux 9 / 10:
 
 ```bash
 sudo dnf install -y cargo rust gtk4-devel openssl-devel desktop-file-utils libappstream-glib
 ```
 
-The project pins `relm4 0.8` / `gtk4 0.8` (with default features disabled) so it builds against the GLib 2.68 and Pango 1.48 libraries shipped on EL9.
+The project pins `relm4 0.8` / `gtk4 0.8` (with default features disabled) so it builds against the GLib and Pango libraries shipped on EL9 and EL10.
 
 Build and run locally:
 
@@ -51,6 +66,12 @@ Or manually:
 ```bash
 cargo build --release --offline
 rpmbuild -ba packaging/boulder-relay.spec
+```
+
+Refresh vendored sources after dependency changes:
+
+```bash
+cargo vendor vendor
 ```
 
 ## Dependencies

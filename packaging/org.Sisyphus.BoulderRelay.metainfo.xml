@@ -14,9 +14,8 @@
       with TLS, NickServ authentication, multi-channel chat, and live user lists.
     </p>
     <p>
-      Default channels target the Rocky Linux community: #rockylinux,
-      #rockylinux-devel, and #rockylinux-social. NickServ registration
-      is required to participate in Rocky channels.
+      Settings are saved between sessions, chat includes timestamps, and
+      slash commands such as /join and /msg are supported from the input box.
     </p>
   </description>
 
@@ -46,6 +45,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.2.0" date="2026-06-24">
+      <description>
+        <p>Added persistent settings, disconnect control, timestamps, slash commands, and EL10 support.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-06-23"/>
   </releases>
 </component>
