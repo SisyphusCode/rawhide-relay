@@ -25,6 +25,14 @@ SPEC="packaging/boulder-relay.spec"
 COMMITTISH="${COPR_COMMIT:-main}"
 DISABLE_OLD=false
 
+COPR_CHROOTS=(
+    epel-9-x86_64
+    epel-10-x86_64
+    centos-stream-10-x86_64
+    fedora-44-x86_64
+    fedora-rawhide-x86_64
+)
+
 for arg in "$@"; do
     case "$arg" in
         --disable-old) DISABLE_OLD=true ;;
@@ -60,14 +68,22 @@ fi
 
 echo "==> Authenticated as: $(copr-cli whoami)"
 
+CHROOT_ARGS=()
+for chroot in "${COPR_CHROOTS[@]}"; do
+    CHROOT_ARGS+=(--chroot "$chroot")
+done
+
 if copr-cli list "${OWNER}" 2>/dev/null | grep -q "^Name: ${PROJECT}$"; then
     echo "==> COPR project ${OWNER}/${PROJECT} already exists"
+    echo "==> Syncing chroots: ${COPR_CHROOTS[*]}"
+    copr-cli modify "${PROJECT}" \
+        "${CHROOT_ARGS[@]}" \
+        --description "GTK4 IRC client for Fedora, RHEL, and Rocky Linux on Libera.Chat"
 else
     echo "==> Creating COPR project ${OWNER}/${PROJECT}..."
     copr-cli create "${PROJECT}" \
-        --chroot epel-9-x86_64 \
-        --chroot fedora-rawhide-x86_64 \
-        --description "GTK4 IRC client for Rocky Linux community channels on Libera.Chat" \
+        "${CHROOT_ARGS[@]}" \
+        --description "GTK4 IRC client for Fedora, RHEL, and Rocky Linux on Libera.Chat" \
         --enable-net on
 fi
 
@@ -98,8 +114,7 @@ BUILD_ID="$(copr-cli buildscm "${OWNER}/${PROJECT}" \
     --commit "${COMMITTISH}" \
     --spec "${SPEC}" \
     --method rpkg \
-    --chroot epel-9-x86_64 \
-    --chroot fedora-rawhide-x86_64 \
+    "${CHROOT_ARGS[@]}" \
     --nowait \
     | awk '/Created Build/{print $3}' | tr -d '[:space:]')"
 

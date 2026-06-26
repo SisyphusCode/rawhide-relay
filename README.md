@@ -1,32 +1,35 @@
 # Boulder Relay
 
-A GTK4 IRC client built in Rust using [relm4](https://relm4.org/), tuned for the Rocky Linux community on Libera.Chat.
+A GTK4 IRC client built in Rust using [relm4](https://relm4.org/), tuned for Fedora, RHEL, and Rocky Linux communities on Libera.Chat.
 
 Named for the Sisyphus myth — the conversation you keep pushing uphill.
 
 ## Features
 
 - TLS IRC connection (port 6697)
-- NickServ authentication (required for Rocky Linux channels)
+- NickServ authentication (required for Fedora, RHEL, and Rocky Linux channels)
 - Multi-channel support with live user lists
-- Channel favorites and per-user mute
+- Channel favorites, grouped sidebar, and per-user mute
 - Persistent settings (`~/.config/boulder-relay/settings.conf`)
 - Connect / disconnect controls
 - Timestamps and auto-scrolling chat view
-- Slash commands: `/join`, `/msg`, `/nick`
-- Gruvbox Dark theme with Rocky green accents
+- Slash commands: `/join`, `/msg`, `/nick`, `/part`, `/clear`, `/help`
+- Gruvbox Dark theme with community color accents
 
 ## Default channels
 
-On connect, the client joins Rocky Linux community channels on `irc.libera.chat`:
+On connect, the client joins community channels on `irc.libera.chat`:
 
-| Channel | Purpose |
-|---------|---------|
-| `#rockylinux` | General support and discussion |
-| `#rockylinux-devel` | Development and release engineering |
-| `#rockylinux-social` | Off-topic and social chat |
+| Channel | Community | Purpose |
+|---------|-----------|---------|
+| `#rockylinux` | Rocky Linux | General support and discussion |
+| `#rockylinux-devel` | Rocky Linux | Development and release engineering |
+| `#rockylinux-social` | Rocky Linux | Off-topic and social chat |
+| `#fedora` | Fedora | General Fedora support and discussion |
+| `#fedora-devel` | Fedora | Development, packaging, and infrastructure |
+| `#rhel-devel` | RHEL | Enterprise Linux development and engineering |
 
-See the [Rocky Linux IRC wiki](https://wiki.rockylinux.org/irc/) for the full channel list and NickServ registration steps.
+See the [Rocky Linux IRC wiki](https://wiki.rockylinux.org/irc/) and [Fedora communications docs](https://docs.fedoraproject.org/en-US/project/communications/) for registration and channel details.
 
 ## Install from COPR
 
@@ -35,13 +38,15 @@ sudo dnf copr enable sisyphuscode/boulder-relay
 sudo dnf install boulder-relay
 ```
 
-Builds are provided for **EPEL 9**, **EPEL 10**, and Fedora Rawhide.
+Builds are provided for **EPEL 9**, **EPEL 10**, **Fedora 44**, and Fedora Rawhide.
+
+Join any Libera.Chat channel from the sidebar: type `#channel` in the join box, use `/join channel` (the `#` is optional), or `/j channel`. Custom channels are remembered between sessions.
 
 On RHEL 10 / Rocky Linux 10 / Alma 10, enable EPEL 10 first if it is not already enabled.
 
 ## Development setup
 
-Install build dependencies on Rocky Linux 9 / 10:
+Install build dependencies on Rocky Linux 9 / 10 or Fedora:
 
 ```bash
 sudo dnf install -y cargo rust gtk4-devel openssl-devel desktop-file-utils libappstream-glib

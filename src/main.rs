@@ -1,6 +1,8 @@
+mod channels;
 mod config;
 mod theme;
 
+use channels::{Community, COMMUNITY_ORDER};
 use config::Settings;
 use futures::prelude::*;
 use gtk::glib::{self, DateTime};
@@ -14,13 +16,6 @@ const DEFAULT_SERVER: &str = "irc.libera.chat";
 const DEFAULT_NICKNAME: &str = "SisyphusCode";
 const DEFAULT_PORT: u16 = 6697;
 const SERVER_TAB: &str = "Server";
-
-/// Rocky Linux community channels on Libera.Chat (see wiki.rockylinux.org/irc).
-const DEFAULT_CHANNELS: &[&str] = &[
-    "#rockylinux",
-    "#rockylinux-devel",
-    "#rockylinux-social",
-];
 
 #[derive(Copy, Clone)]
 enum LineStyle {
@@ -36,7 +31,8 @@ struct ChatLine {
     style: LineStyle,
 }
 
-const HELP_TEXT: &str = "Commands: /join #chan, /part [#chan], /msg nick text, /clear, /nick name, /help\n";
+const HELP_TEXT: &str = "Commands: /join chan, /j chan, /part [#chan], /msg nick text, /clear, /nick name, /help\n\
+Join box: type #channel to join, or a nick for a DM. Any channel is supported.\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConnectionState {
@@ -67,6 +63,7 @@ pub enum AppInput {
     UserLeft { channel: String, user: String },
     UserQuit { user: String },
     SendMessage(String),
+    JoinEntry(String),
     SaveSettings,
 }
 
@@ -107,13 +104,34 @@ impl AppModel {
             .unwrap_or_else(|_| String::from("[??:??] "))
     }
 
+    fn extra_channels(&self) -> Vec<String> {
+        let defaults: std::collections::HashSet<_> =
+            channels::default_channel_names().into_iter().collect();
+        self.channels
+            .iter()
+            .filter(|channel| {
+                **channel != SERVER_TAB && !defaults.contains(*channel)
+            })
+            .cloned()
+            .collect()
+    }
+
     fn settings_snapshot(&self) -> Settings {
         Settings {
             nickname: self.nickname.clone(),
             server: self.server.clone(),
             password: self.password.clone(),
             favorites: self.favorite_channels.clone(),
+            extra_channels: self.extra_channels(),
             last_channel: self.active_channel.clone(),
+        }
+    }
+
+    fn send_irc_join(&self, target: &str) {
+        if let Some(irc_tx) = &self.irc_sender {
+            if channels::is_channel_target(target) {
+                let _ = irc_tx.send_join(target);
+            }
         }
     }
 
@@ -204,68 +222,126 @@ impl AppModel {
         }
     }
 
+    fn append_section_header(&self, label: &str) {
+        let header = gtk::Label::builder()
+            .label(label)
+            .halign(gtk::Align::Start)
+            .margin_start(8)
+            .margin_top(8)
+            .margin_bottom(2)
+            .build();
+        header.add_css_class("channel-section");
+        self.channel_box.append(&header);
+    }
+
+    fn append_channel_row(&self, sender: &ComponentSender<Self>, channel: &str) {
+        let is_favorite = self.favorite_channels.iter().any(|c| c == channel);
+
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(4)
+            .build();
+
+        let select_btn = gtk::Button::with_label(channel);
+        select_btn.set_hexpand(true);
+        select_btn.set_halign(gtk::Align::Fill);
+
+        if let Some(info) = channels::channel_info(channel) {
+            select_btn.set_tooltip_text(Some(info.description));
+            select_btn.add_css_class(channels::community_css_class(info.community));
+        }
+
+        let s1 = sender.clone();
+        let ch1 = channel.to_string();
+        select_btn.connect_clicked(move |_| {
+            s1.input(AppInput::SelectChannel(ch1.clone()));
+        });
+
+        let fav_icon = if is_favorite { "★" } else { "☆" };
+        let fav_btn = gtk::Button::with_label(fav_icon);
+        fav_btn.add_css_class("fav-btn");
+        fav_btn.set_tooltip_text(Some(if is_favorite {
+            "Remove from favorites"
+        } else {
+            "Add to favorites"
+        }));
+
+        let s2 = sender.clone();
+        let ch2 = channel.to_string();
+        fav_btn.connect_clicked(move |_| {
+            s2.input(AppInput::ToggleFavorite(ch2.clone()));
+        });
+
+        row.append(&select_btn);
+        row.append(&fav_btn);
+
+        if channel.starts_with('#') {
+            let part_btn = gtk::Button::with_label("×");
+            part_btn.add_css_class("part-btn");
+            part_btn.set_tooltip_text(Some("Leave channel"));
+
+            let s3 = sender.clone();
+            let ch3 = channel.to_string();
+            part_btn.connect_clicked(move |_| {
+                s3.input(AppInput::PartChannel(ch3.clone()));
+            });
+
+            row.append(&part_btn);
+        }
+
+        self.channel_box.append(&row);
+    }
+
     fn refresh_channels(&self, sender: &ComponentSender<Self>) {
         while let Some(child) = self.channel_box.first_child() {
             self.channel_box.remove(&child);
         }
 
         let mut favorites = Vec::new();
-        let mut others = Vec::new();
+        let mut by_community: std::collections::HashMap<Community, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut other_channels = Vec::new();
 
         for channel in &self.channels {
             if self.favorite_channels.contains(channel) {
                 favorites.push(channel.clone());
+                continue;
+            }
+
+            if let Some(community) = channels::community_for(channel) {
+                by_community
+                    .entry(community)
+                    .or_default()
+                    .push(channel.clone());
             } else {
-                others.push(channel.clone());
+                other_channels.push(channel.clone());
             }
         }
 
-        for channel in favorites.into_iter().chain(others.into_iter()) {
-            let is_favorite = self.favorite_channels.contains(&channel);
-
-            let row = gtk::Box::builder()
-                .orientation(gtk::Orientation::Horizontal)
-                .spacing(4)
-                .build();
-
-            let select_btn = gtk::Button::with_label(&channel);
-            select_btn.set_hexpand(true);
-            select_btn.set_halign(gtk::Align::Fill);
-
-            let s1 = sender.clone();
-            let ch1 = channel.clone();
-            select_btn.connect_clicked(move |_| {
-                s1.input(AppInput::SelectChannel(ch1.clone()));
-            });
-
-            let fav_icon = if is_favorite { "★" } else { "☆" };
-            let fav_btn = gtk::Button::with_label(fav_icon);
-            fav_btn.add_css_class("fav-btn");
-
-            let s2 = sender.clone();
-            let ch2 = channel.clone();
-            fav_btn.connect_clicked(move |_| {
-                s2.input(AppInput::ToggleFavorite(ch2.clone()));
-            });
-
-            row.append(&select_btn);
-            row.append(&fav_btn);
-
-            if channel.starts_with('#') {
-                let part_btn = gtk::Button::with_label("×");
-                part_btn.add_css_class("part-btn");
-                part_btn.set_tooltip_text(Some("Leave channel"));
-
-                let s3 = sender.clone();
-                let ch3 = channel.clone();
-                part_btn.connect_clicked(move |_| {
-                    s3.input(AppInput::PartChannel(ch3.clone()));
-                });
-
-                row.append(&part_btn);
+        if !favorites.is_empty() {
+            self.append_section_header("★ Favorites");
+            for channel in &favorites {
+                self.append_channel_row(sender, channel);
             }
+        }
 
-            self.channel_box.append(&row);
+        for community in COMMUNITY_ORDER {
+            let Some(mut community_channels) = by_community.remove(community) else {
+                continue;
+            };
+            community_channels.sort_by_key(|name| name.to_lowercase());
+            self.append_section_header(channels::community_label(*community));
+            for channel in &community_channels {
+                self.append_channel_row(sender, channel);
+            }
+        }
+
+        if !other_channels.is_empty() {
+            other_channels.sort_by_key(|name| name.to_lowercase());
+            self.append_section_header("Other");
+            for channel in &other_channels {
+                self.append_channel_row(sender, channel);
+            }
         }
     }
 
@@ -346,7 +422,7 @@ impl SimpleComponent for AppModel {
                     add_css_class: "sidebar", set_margin_all: 0,
 
                     gtk::Label { set_label: "BOULDER RELAY", add_css_class: "sidebar-title", set_margin_top: 16 },
-                    gtk::Label { set_label: "Rocky Linux on Libera", set_margin_start: 12, set_margin_end: 12 },
+                    gtk::Label { set_label: "Fedora · RHEL · Rocky on Libera", set_margin_start: 12, set_margin_end: 12 },
                     gtk::Separator { set_orientation: gtk::Orientation::Horizontal },
 
                     gtk::Label { set_label: "Network Configuration", add_css_class: "sidebar-subtitle", set_halign: gtk::Align::Start, set_margin_start: 12 },
@@ -354,10 +430,28 @@ impl SimpleComponent for AppModel {
                         set_text: &model.nickname, set_placeholder_text: Some("Nickname"), set_margin_start: 12, set_margin_end: 12,
                         connect_changed[sender] => move |entry| { sender.input(AppInput::UpdateNickname(entry.text().to_string())); }
                     },
-                    gtk::Entry {
-                        set_text: &model.password, set_placeholder_text: Some("NickServ Password (Opt)"), set_margin_start: 12, set_margin_end: 12,
-                        set_visibility: false,
-                        connect_changed[sender] => move |entry| { sender.input(AppInput::UpdatePassword(entry.text().to_string())); }
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Horizontal,
+                        set_spacing: 4,
+                        set_margin_start: 12,
+                        set_margin_end: 12,
+                        gtk::Entry {
+                            set_text: &model.password,
+                            set_placeholder_text: Some("NickServ Password (Opt)"),
+                            set_hexpand: true,
+                            set_visibility: false,
+                            connect_changed[sender] => move |entry| { sender.input(AppInput::UpdatePassword(entry.text().to_string())); }
+                        },
+                        gtk::Button {
+                            set_label: "👁",
+                            set_tooltip_text: Some("Show or hide password"),
+                            connect_clicked => move |button| {
+                                if let Some(entry) = button.prev_sibling().and_downcast::<gtk::Entry>() {
+                                    let visible = entry.property::<bool>("visibility");
+                                    entry.set_visibility(!visible);
+                                }
+                            }
+                        },
                     },
                     gtk::Entry {
                         set_text: &model.server, set_placeholder_text: Some("Server address"), set_margin_start: 12, set_margin_end: 12,
@@ -397,12 +491,14 @@ impl SimpleComponent for AppModel {
 
                     gtk::Label { set_label: "Channels & DMs", add_css_class: "sidebar-subtitle", set_halign: gtk::Align::Start, set_margin_start: 12 },
                     gtk::Entry {
-                        set_placeholder_text: Some("Join #channel, user, or /join …"), set_margin_start: 12, set_margin_end: 12,
+                        set_placeholder_text: Some("#channel to join, nick for DM, or /join …"),
+                        set_margin_start: 12,
+                        set_margin_end: 12,
                         connect_activate[sender] => move |entry| {
                             let text = entry.text().to_string();
                             if !text.is_empty() {
                                 entry.set_text("");
-                                sender.input(AppInput::SendMessage(text));
+                                sender.input(AppInput::JoinEntry(text));
                             }
                         }
                     },
@@ -470,7 +566,7 @@ impl SimpleComponent for AppModel {
 
         let settings = Settings::load();
         let server_tab = String::from(SERVER_TAB);
-        let rocky_channels: Vec<String> = DEFAULT_CHANNELS.iter().map(|c| c.to_string()).collect();
+        let default_channels = channels::default_channel_names();
 
         let mut chat_histories = HashMap::new();
         chat_histories.insert(
@@ -484,7 +580,19 @@ impl SimpleComponent for AppModel {
                 },
                 ChatLine {
                     text: String::from(
-                        "[System]: Rocky channels require a registered nick (wiki.rockylinux.org/irc).\n",
+                        "[System]: #fedora, #fedora-devel, and #rhel-devel require a registered nick.\n",
+                    ),
+                    style: LineStyle::System,
+                },
+                ChatLine {
+                    text: String::from(
+                        "[System]: Rocky channels also require registration (wiki.rockylinux.org/irc).\n",
+                    ),
+                    style: LineStyle::System,
+                },
+                ChatLine {
+                    text: String::from(
+                        "[System]: Join any channel via the sidebar (#channel) or /join channel. Custom channels are saved.\n",
                     ),
                     style: LineStyle::System,
                 },
@@ -503,10 +611,20 @@ impl SimpleComponent for AppModel {
         Self::setup_chat_tags(&chat_view);
 
         let mut channels = vec![server_tab.clone()];
-        channels.extend(rocky_channels.clone());
+        channels.extend(default_channels.clone());
+        for extra in &settings.extra_channels {
+            if !channels.contains(extra) {
+                channels.push(extra.clone());
+            }
+        }
 
         let favorites = if settings.favorites.is_empty() {
-            vec![server_tab.clone(), rocky_channels[0].clone(), rocky_channels[1].clone()]
+            vec![
+                server_tab.clone(),
+                String::from("#rockylinux-devel"),
+                String::from("#fedora-devel"),
+                String::from("#rhel-devel"),
+            ]
         } else {
             settings.favorites.clone()
         };
@@ -577,7 +695,7 @@ impl SimpleComponent for AppModel {
                 let channels_to_join: Vec<String> = self
                     .channels
                     .iter()
-                    .filter(|c| c.starts_with('#'))
+                    .filter(|c| channels::is_channel_target(c))
                     .cloned()
                     .collect();
 
@@ -817,12 +935,9 @@ impl SimpleComponent for AppModel {
                         }],
                     );
                     self.refresh_channels(&sender);
-
-                    if let Some(irc_tx) = &self.irc_sender {
-                        if target.starts_with('#') {
-                            let _ = irc_tx.send_join(&target);
-                        }
-                    }
+                    self.send_irc_join(&target);
+                } else {
+                    self.send_irc_join(&target);
                 }
 
                 self.active_channel = target;
@@ -979,6 +1094,28 @@ impl SimpleComponent for AppModel {
                 self.refresh_users(&sender);
             }
 
+            AppInput::JoinEntry(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return;
+                }
+
+                if text.starts_with('/') {
+                    sender.input(AppInput::SendMessage(text.to_string()));
+                    return;
+                }
+
+                match channels::parse_join_entry(text) {
+                    Some(channels::JoinTarget::Channel(channel)) => {
+                        sender.input(AppInput::JoinChannel(channel));
+                    }
+                    Some(channels::JoinTarget::DirectMessage(nick)) => {
+                        sender.input(AppInput::JoinChannel(nick));
+                    }
+                    None => {}
+                }
+            }
+
             AppInput::SendMessage(text) => {
                 let text = text.trim();
                 if text.is_empty() {
@@ -989,9 +1126,11 @@ impl SimpleComponent for AppModel {
                     let mut parts = text.splitn(3, ' ');
                     let command = parts.next().unwrap_or("");
                     match command {
-                        "/join" => {
+                        "/join" | "/j" => {
                             if let Some(channel) = parts.next() {
-                                sender.input(AppInput::JoinChannel(channel.to_string()));
+                                if let Some(channel) = channels::parse_join_command(channel) {
+                                    sender.input(AppInput::JoinChannel(channel));
+                                }
                             }
                             return;
                         }

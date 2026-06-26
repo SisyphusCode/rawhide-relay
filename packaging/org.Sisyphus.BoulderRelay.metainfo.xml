@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>org.Sisyphus.BoulderRelay</id>
   <name>Boulder Relay</name>
-  <summary>GTK4 IRC client for Rocky Linux community channels</summary>
+  <summary>GTK4 IRC client for Fedora, RHEL, and Rocky Linux communities</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-2.0-or-later</project_license>
@@ -14,9 +14,10 @@
       with TLS, NickServ authentication, multi-channel chat, and live user lists.
     </p>
     <p>
-      Settings are saved between sessions, chat includes timestamps, nick
-      highlights, and slash commands such as /join, /part, /clear, and /msg
-      are supported from the input box.
+      Default channels include Rocky Linux (#rockylinux*), Fedora (#fedora,
+      #fedora-devel), and RHEL (#rhel-devel). Settings are saved between
+      sessions, chat includes timestamps and nick highlights, and slash
+      commands such as /join, /part, /clear, and /msg are supported.
     </p>
   </description>
 
@@ -29,6 +30,8 @@
 
   <keywords>
     <keyword>IRC</keyword>
+    <keyword>Fedora</keyword>
+    <keyword>RHEL</keyword>
     <keyword>Rocky Linux</keyword>
     <keyword>Chat</keyword>
     <keyword>Libera</keyword>
@@ -46,6 +49,16 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.2.4" date="2026-06-26">
+      <description>
+        <p>Persist custom channels, improve join parsing for any Libera channel, and add Fedora 44 COPR builds.</p>
+      </description>
+    </release>
+    <release version="0.2.3" date="2026-06-26">
+      <description>
+        <p>Add Fedora and RHEL default channels, grouped sidebar sections, and community color accents.</p>
+      </description>
+    </release>
     <release version="0.2.2" date="2026-06-24">
       <description>
         <p>Fix white GNOME title bar by loading theme CSS after GTK init and replacing default window decorations.</p>

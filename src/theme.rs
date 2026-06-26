@@ -66,6 +66,21 @@ headerbar.boulder-header button:hover {
     font-size: 0.9em;
 }
 
+.boulder-relay .channel-section {
+    font-weight: bold;
+    color: #928374;
+    font-size: 0.85em;
+    letter-spacing: 0.04em;
+}
+
+.boulder-relay button.channel-rocky {
+    color: #10B981;
+}
+
+.boulder-relay button.channel-fedora {
+    color: #3C6EB4;
+}
+
 .boulder-relay .status-connected { color: #b8bb26; }
 .boulder-relay .status-connecting { color: #fabd2f; }
 .boulder-relay .status-offline { color: #928374; }
@@ -211,7 +226,7 @@ pub fn build_titlebar() -> gtk::HeaderBar {
     header.pack_end(&controls);
 
     let title = gtk::Label::builder()
-        .label("Boulder Relay — Rocky Linux IRC")
+        .label("Boulder Relay — Enterprise Linux IRC")
         .css_classes(["title"])
         .build();
     header.set_title_widget(Some(&title));

@@ -11,6 +11,7 @@ pub struct Settings {
     pub server: String,
     pub password: String,
     pub favorites: Vec<String>,
+    pub extra_channels: Vec<String>,
     pub last_channel: String,
 }
 
@@ -22,10 +23,12 @@ impl Default for Settings {
             password: String::new(),
             favorites: vec![
                 String::from("Server"),
-                String::from("#rockylinux"),
                 String::from("#rockylinux-devel"),
+                String::from("#fedora-devel"),
+                String::from("#rhel-devel"),
             ],
-            last_channel: String::from("#rockylinux-devel"),
+            extra_channels: Vec::new(),
+            last_channel: String::from("#fedora-devel"),
         }
     }
 }
@@ -56,6 +59,13 @@ impl Settings {
                 .map(str::to_string)
                 .collect();
         }
+        if let Some(extra_channels) = values.remove("extra_channels") {
+            settings.extra_channels = extra_channels
+                .split('|')
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
         if let Some(last_channel) = values.remove("last_channel") {
             settings.last_channel = last_channel;
         }
@@ -70,12 +80,14 @@ impl Settings {
         }
 
         let favorites = self.favorites.join("|");
+        let extra_channels = self.extra_channels.join("|");
         let body = format!(
-            "nickname={}\nserver={}\npassword={}\nfavorites={}\nlast_channel={}\n",
+            "nickname={}\nserver={}\npassword={}\nfavorites={}\nextra_channels={}\nlast_channel={}\n",
             escape_value(&self.nickname),
             escape_value(&self.server),
             escape_value(&self.password),
             escape_value(&favorites),
+            escape_value(&extra_channels),
             escape_value(&self.last_channel),
         );
         fs::write(path, body)
@@ -143,6 +155,7 @@ mod tests {
             server: String::from("irc.libera.chat"),
             password: String::from("sec\\ret"),
             favorites: vec![String::from("#rockylinux")],
+            extra_channels: vec![String::from("#archlinux")],
             last_channel: String::from("#rockylinux-devel"),
         };
         let encoded = format!(

@@ -1,7 +1,7 @@
 Name:           boulder-relay
-Version:        0.2.2
+Version:        0.2.4
 Release:        1%{?dist}
-Summary:        GTK4 IRC client for Rocky Linux community channels on Libera.Chat
+Summary:        GTK4 IRC client for Fedora, RHEL, and Rocky Linux on Libera.Chat
 
 License:        GPL-2.0-or-later
 URL:            https://github.com/SisyphusCode/boulder-relay
@@ -21,11 +21,11 @@ Requires:       gtk4
 Requires:       openssl-libs
 
 %description
-Boulder Relay is a GTK4 IRC client built in Rust with relm4, oriented
-toward Rocky Linux development and community chat on Libera.Chat. It
-connects over TLS, supports NickServ authentication, persistent settings,
-slash commands, and ships with #rockylinux, #rockylinux-devel, and
-#rockylinux-social as default channels.
+Boulder Relay is a GTK4 IRC client built in Rust with relm4 for Fedora,
+RHEL, and Rocky Linux community chat on Libera.Chat. It connects over
+TLS, supports NickServ authentication, persistent settings, slash
+commands, and ships with Rocky, Fedora, and RHEL development channels
+as defaults.
 
 %prep
 %autosetup -n boulder-relay-%{version}
@@ -54,6 +54,16 @@ appstream-util validate-relax --nonet packaging/org.Sisyphus.BoulderRelay.metain
 %{_metainfodir}/org.Sisyphus.BoulderRelay.metainfo.xml
 
 %changelog
+* Fri Jun 26 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.2.4-1
+- Persist user-added channels between sessions
+- Improve join box and /join parsing for arbitrary channels
+- Add Fedora 44 COPR build target
+
+* Fri Jun 26 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.2.3-1
+- Add #fedora, #fedora-devel, and #rhel-devel default channels
+- Group sidebar by community with tooltips and color accents
+- Broaden branding for Fedora, RHEL, and Rocky Linux
+
 * Wed Jun 24 2026 Kenny Glowner <sisyphuscode@fedoraproject.org> - 0.2.2-1
 - Fix white GNOME title bar: load CSS after GTK init and use custom WindowControls
 - Override Adwaita default-decoration header styling with higher-priority Gruvbox CSS
